@@ -120,6 +120,75 @@ new-candidate.sh 07
   Ideas, not in issues. `gh api graphql` is needed to list them; the
   `gh issue` commands do not see discussions.
 
+## Running it in Docker (verified 2026-11-03)
+
+Two distinct things, easy to conflate:
+
+**Full self-hosted stack, no local Node needed.** `docker-compose.yml` builds
+the app image (`apps/web/Dockerfile`, `node:24` inside the container) and
+runs it with Postgres. The container runs `prisma migrate deploy` on boot,
+then the standalone Next.js server. Build takes several minutes on an M-series
+Mac. Verified: `/api/status` reports the database connected, login page
+renders, and the sign-in OTP email reaches Mailpit.
+
+Gotchas when the dev dependency stack is also running:
+
+- Both compose files default to the project name `rallly` and both publish
+  Postgres on host port 5450, so run the self-hosted stack under its own
+  project name with an override that moves the port.
+- `apps/web/.env` is loaded via `env_file` and points SMTP, S3 and KV at
+  `localhost` / `0.0.0.0`, which resolve to the container itself. Reset
+  `env_file` and pass only what the container needs; `host.docker.internal`
+  reaches services on the Mac.
+
+Override used (kept outside the repo):
+
+```yaml
+services:
+  rallly_db:
+    ports: !override
+      - "5451:5432"
+  rallly_selfhosted:
+    env_file: !reset []
+    environment:
+      - DATABASE_URL=postgres://postgres:postgres@rallly_db/rallly
+      - SECRET_PASSWORD=<openssl rand -hex 32>
+      - NEXT_PUBLIC_BASE_URL=http://localhost:3000
+      - SUPPORT_EMAIL=support@example.com
+      - SMTP_HOST=host.docker.internal   # the dev stack's Mailpit
+      - SMTP_PORT=1025
+      - SMTP_SECURE=false
+```
+
+```sh
+docker compose -p rallly-selfhosted -f docker-compose.yml -f <override> up --build -d
+docker compose -p rallly-selfhosted down --volumes   # tear down
+```
+
+This is a production build: no hot reload, so it is for "just run it", not
+for development.
+
+**Docker-based dev mode with hot reload: does not exist.** No devcontainer,
+no `Dockerfile.dev`, no compose service that runs `next dev`. Reasons not to
+build a bespoke one, beyond bind-mount performance on macOS:
+
+- `pnpm dev` runs `next dev` through `portless`, a host-level proxy that
+  assigns `https://web.rallly.localhost` and injects it as
+  `NEXT_PUBLIC_BASE_URL`; `next.config.ts` whitelists that origin in
+  `allowedDevOrigins`. A container would bypass portless and run `next dev`
+  directly with its own base URL: a second, undocumented path.
+- Linux binaries in the container's `node_modules` cannot be shared with the
+  host, so editor type-checking needs a second install and brings back the
+  Node 24 requirement anyway.
+- File watching over Docker Desktop's bind mount is slow and occasionally
+  drops events, which reads as "I saved and nothing changed" mid-exercise.
+
+Recommendation: suggested path is native Node 24 + `pnpm docker:up` (what
+the repo docs and CLAUDE.md describe, so the candidate's assistant finds it
+unaided). Optional streamlined path is a devcontainer referencing
+`docker-compose.dev.yml` via `dockerComposeFile`; Codespaces then removes
+Docker Desktop from the candidate's machine entirely. Not yet written.
+
 ## Next steps
 
 1. Create the interview org and base repo; pick the plan.
